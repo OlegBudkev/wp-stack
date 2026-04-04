@@ -234,6 +234,18 @@ if [ "$MODE" == "FINISH" ]; then
     THEME_NAME="comandos-ai-blog"
     THEME_DIR="/var/www/html/wp-content/themes/$THEME_NAME"
 
+    # Копируем файлы темы из папки сайта в контейнер (если тема ещё не установлена)
+    print_info "Копирование файлов темы в контейнер..."
+    docker exec "$CONTAINER_WP" mkdir -p "$THEME_DIR"
+    # Копируем только файлы темы (php, css, js, assets), исключая docker-compose и т.д.
+    for f in style.css index.php functions.php header.php footer.php archive.php single.php search.php \
+              commands-wp.css comandos-wp.css critical-desktop.css critical-mobile.css; do
+        [ -f "$PRODUCT_DIR/$f" ] && docker cp "$PRODUCT_DIR/$f" "${CONTAINER_WP}:${THEME_DIR}/"
+    done
+    for d in js assets inc template-parts; do
+        [ -d "$PRODUCT_DIR/$d" ] && docker cp "$PRODUCT_DIR/$d" "${CONTAINER_WP}:${THEME_DIR}/"
+    done
+
     print_info "Активация темы $THEME_NAME..."
     if ! docker exec "$CONTAINER_WP" bash -c "wp theme activate $THEME_NAME --allow-root"; then
         print_warning "Пробую через SQL..."
