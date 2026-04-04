@@ -10,7 +10,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-DEFAULT_CERT_RESOLVER="myresolver"
+DEFAULT_CERT_RESOLVER="mytlschallenge"
 BASE_DIR="$HOME/comandos"
 SNAPSHOT_TAR="wordpress_data.tar.gz"
 SNAPSHOT_DB="wordpress_db.sql.gz"
@@ -49,7 +49,18 @@ ask_user() {
 }
 
 clean_url() { echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||'; }
-make_slug()  { echo "$1" | tr '.' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g'; }
+make_slug() {
+    # LC_ALL=C обязателен чтобы tr не ломал многобайтовые UTF-8 символы
+    local input="$1"
+    # 1. Убираем все не-ASCII символы (кириллица, спецсимволы)
+    local ascii
+    ascii=$(echo "$input" | LC_ALL=C sed 's/[^[:print:]]//g' | sed 's/[^ -~]//g')
+    # 2. Заменяем точки на дефисы, приводим к нижнему регистру
+    echo "$ascii" | LC_ALL=C tr '[:upper:]' '[:lower:]' | tr '.' '-' \
+        | sed 's/[^a-z0-9-]/-/g' \
+        | sed 's/--*/-/g' \
+        | sed 's/^-//;s/-$//'
+}
 
 mkdir -p "$BASE_DIR"
 print_logo
@@ -82,19 +93,21 @@ print_header "ЧТО ХОТИТЕ СДЕЛАТЬ?"
 echo -e "  ${GREEN}1)${NC} Установить новый сайт на новом поддомене"
 echo -e "  ${YELLOW}2)${NC} Обновить существующий сайт (сохранить базу данных)"
 echo -e "  ${RED}3)${NC} Переустановить существующий сайт (СТЕРЕТЬ ВСЁ)"
+echo -e "  ${BLUE}4)${NC} Завершить настройку wordpress (тема, плагины и т.д.),если установка была прервана после входа в админку"
 echo
-ask_user "Выберите вариант (1/2/3): " MAIN_CHOICE
+ask_user "Выберите вариант (1/2/3/4): " MAIN_CHOICE
 
 case "$MAIN_CHOICE" in
     1) ACTION="NEW" ;;
     2) ACTION="UPDATE" ;;
     3) ACTION="REINSTALL" ;;
+    4) ACTION="FINISH" ;;
     *) print_error "Неверный выбор."; exit 1 ;;
 esac
 
 # ──────────────────────────────────────────────────────────
 # Выбор существующего сайта (для UPDATE / REINSTALL)
-if [ "$ACTION" == "UPDATE" ] || [ "$ACTION" == "REINSTALL" ]; then
+if [ "$ACTION" == "UPDATE" ] || [ "$ACTION" == "REINSTALL" ] || [ "$ACTION" == "FINISH" ]; then
     if [ ${#INSTALLED_SLUGS[@]} -eq 0 ]; then
         print_error "Нет установленных сайтов Comandos в $BASE_DIR"
         exit 1
@@ -132,6 +145,9 @@ if [ "$ACTION" == "UPDATE" ] || [ "$ACTION" == "REINSTALL" ]; then
             print_info "Домен не совпал. Отмена."; exit 1
         fi
         MODE="INSTALL"
+    elif [ "$ACTION" == "FINISH" ]; then
+        MODE="FINISH"
+        print_success "Режим ЗАВЕРШЕНИЯ НАСТРОЙКИ: $WP_DOMAIN"
     else
         MODE="UPDATE"
         print_success "Режим ОБНОВЛЕНИЯ: $WP_DOMAIN (данные сохранятся)"
@@ -185,6 +201,66 @@ if [ "$MODE" == "INSTALL" ]; then
     ask_user "SSL Email: " SSL_EMAIL
     DB_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9')
 fi
+
+# ──────────────────────────────────────────────────────────
+# FINISH — завершение прерванной установки (пропускаем все шаги деплоя)
+if [ "$MODE" == "FINISH" ]; then
+    print_header "ЗАВЕРШЕНИЕ НАСТРОЙКИ WORDPRESS: $WP_DOMAIN"
+
+    ensure_wp_cli() {
+        docker exec -u 0 "$CONTAINER_WP" bash -c '
+          if [ ! -f /usr/local/bin/wp ]; then
+            curl -sSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+            chmod +x /usr/local/bin/wp
+          fi
+        '
+    }
+
+    ensure_wp_cli
+
+    # Проверяем, установлен ли WordPress
+    if docker exec "$CONTAINER_WP" bash -c "wp core is-installed --allow-root" > /dev/null 2>&1; then
+        print_success "WordPress уже установлен через веб-интерфейс. Продолжаю настройку..."
+    else
+        print_warning "WordPress ещё не установлен через веб-интерфейс."
+        echo -e "\n${BLUE}==============================================${NC}"
+        echo -e "${YELLOW}ШАГ 1:${NC} Перейдите: ${GREEN}https://$WP_DOMAIN/wp-admin/install.php${NC}"
+        echo -e "${YELLOW}ШАГ 2:${NC} Завершите установку WordPress (создайте администратора)."
+        echo -e "${YELLOW}ШАГ 3:${NC} Вернитесь сюда и нажмите ${BLUE}[ENTER]${NC}."
+        echo -e "${BLUE}==============================================${NC}"
+        ask_user "Нажмите [ENTER] после завершения установки в браузере..." dummy
+    fi
+
+    THEME_NAME="comandos-ai-blog"
+    THEME_DIR="/var/www/html/wp-content/themes/$THEME_NAME"
+
+    print_info "Активация темы $THEME_NAME..."
+    if ! docker exec "$CONTAINER_WP" bash -c "wp theme activate $THEME_NAME --allow-root"; then
+        print_warning "Пробую через SQL..."
+        docker exec "$CONTAINER_DB" mysql -uwordpress -p"$DB_PASSWORD" wordpress -e \
+            "UPDATE wp_options SET option_value = '$THEME_NAME' WHERE option_name IN ('template', 'stylesheet');"
+    fi
+
+    print_info "Установка и активация плагинов..."
+    docker exec "$CONTAINER_WP" bash -c "wp plugin install wordpress-seo wp-graphql indexnow --activate --allow-root" || true
+    docker exec "$CONTAINER_WP" bash -c "wp plugin install https://github.com/ashhitch/wp-graphql-yoast-seo/archive/refs/tags/v5.0.0.zip --activate --allow-root" || true
+
+    print_info "Очистка дефолтного контента..."
+    docker exec "$CONTAINER_WP" bash -c 'IDS=$(wp post list --post_type=post,page --format=ids --allow-root); [ -n "$IDS" ] && wp post delete $IDS --force --allow-root'
+    docker exec "$CONTAINER_WP" bash -c 'CIDS=$(wp comment list --format=ids --allow-root); [ -n "$CIDS" ] && wp comment delete $CIDS --force --allow-root'
+    docker exec "$CONTAINER_WP" bash -c 'wp plugin delete akismet hello --allow-root > /dev/null 2>&1 || true'
+    docker exec "$CONTAINER_WP" bash -c "wp theme list --field=name --allow-root | grep -v \"^${THEME_NAME}$\" | xargs -r wp theme delete --allow-root" || true
+
+    echo -e "\n"
+    print_header "НАСТРОЙКА ЗАВЕРШЕНА!"
+    print_info "WordPress:   https://$WP_DOMAIN/"
+    print_info "Админка:     https://$WP_DOMAIN/wp-admin"
+    print_info "Тема:        $THEME_NAME активирована"
+    print_warning "Если дизайн не обновился — Ctrl+F5"
+    echo -e "${BLUE}================================================${NC}"
+    exit 0
+fi
+
 
 # ──────────────────────────────────────────────────────────
 # Snapshot detection
@@ -261,15 +337,13 @@ DB_PASSWORD_ESC=$(escape_sed "$DB_PASSWORD")
 CONTAINER_WP_ESC=$(escape_sed "$CONTAINER_WP")
 CONTAINER_DB_ESC=$(escape_sed "$CONTAINER_DB")
 
-# Используем точные имена из шаблона (comandos-wp: и comandos-db:)
-# чтобы не затронуть случайные вхождения вроде 'comandos-wp-slug'
+# Глобальная замена: сначала db, потом wp (порядок важен)
+# Заменяет ВСЕ вхождения: service names, container_name, depends_on, traefik labels, DB_HOST и т.д.
 sed -e "s|{{WP_DOMAIN}}|$WP_DOMAIN_ESC|g" \
     -e "s|{{SSL_EMAIL}}|$SSL_EMAIL_ESC|g" \
     -e "s|{{DB_PASSWORD}}|$DB_PASSWORD_ESC|g" \
-    -e "s|container_name: comandos-wp|container_name: $CONTAINER_WP_ESC|g" \
-    -e "s|container_name: comandos-db|container_name: $CONTAINER_DB_ESC|g" \
-    -e "s|comandos-db:|$CONTAINER_DB_ESC:|g" \
-    -e "s|comandos-wp:|$CONTAINER_WP_ESC:|g" \
+    -e "s|comandos-db|$CONTAINER_DB_ESC|g" \
+    -e "s|comandos-wp|$CONTAINER_WP_ESC|g" \
     docker-compose.yml.j2 > docker-compose.yml
 
 sed -e "s|{{WP_DOMAIN}}|$WP_DOMAIN_ESC|g" user-guide.md.j2 > user-guide.md
@@ -448,7 +522,11 @@ if [ -n "$TRAEFIK_ID" ]; then
     docker network connect comandos-network "$TRAEFIK_ID" 2>/dev/null || true
 
     TRAEFIK_RESOLVER=$(docker inspect "$TRAEFIK_ID" --format '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' \
-        | tr -d '[],"' | tr ' ' '\n' | grep -oE -- 'certificatesresolvers\.[^=. ]+' | head -n1 | sed 's/certificatesresolvers\.//')
+        | tr -d '[],' | tr ' ' '\n' | grep -oE -- 'certificatesresolvers\.[^=. "]+' | head -n1 | sed 's/certificatesresolvers\.//')
+    # Пробуем найти certResolver из существующих yml-файлов в dynamic dir (самый надёжный способ)
+    if [ -z "$TRAEFIK_RESOLVER" ] && [ -n "$DYNAMIC_DIR" ] && [ -d "$DYNAMIC_DIR" ]; then
+        TRAEFIK_RESOLVER=$(grep -rh 'certResolver:' "$DYNAMIC_DIR" 2>/dev/null | head -n1 | awk '{print $2}' | tr -d '"\r')
+    fi
     if [ -z "$TRAEFIK_RESOLVER" ]; then
         for known in "mytlschallenge" "myresolver" "letsencrypt" "comandos-resolver"; do
             docker logs --tail 100 "$TRAEFIK_ID" 2>&1 | grep -q "$known" && { TRAEFIK_RESOLVER="$known"; break; }
