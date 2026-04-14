@@ -17,6 +17,11 @@ SNAPSHOT_DB="wordpress_db.sql.gz"
 SNAPSHOT_URL="${COMANDOS_SNAPSHOT_URL:-}"
 SNAPSHOT_DB_URL="${COMANDOS_SNAPSHOT_DB_URL:-}"
 RESTORE_SNAPSHOT="${COMANDOS_RESTORE_SNAPSHOT:-false}"
+DEFAULT_PHP_UPLOAD_MAX_FILESIZE="256M"
+DEFAULT_PHP_POST_MAX_SIZE="256M"
+DEFAULT_PHP_MEMORY_LIMIT="512M"
+DEFAULT_PHP_MAX_EXECUTION_TIME="300"
+DEFAULT_PHP_MAX_INPUT_TIME="300"
 
 print_logo() {
     echo -e "${BLUE}"
@@ -46,6 +51,59 @@ ask_user() {
     else
         read $extra_opt -p "$prompt" "$var_name"
     fi
+}
+
+ask_with_default() {
+    local prompt="$1" var_name="$2" default_value="$3"
+    local answer
+    ask_user "$prompt [$default_value]: " answer
+    printf -v "$var_name" '%s' "${answer:-$default_value}"
+}
+
+configure_php_limits() {
+    PHP_UPLOAD_MAX_FILESIZE="${PHP_UPLOAD_MAX_FILESIZE:-$DEFAULT_PHP_UPLOAD_MAX_FILESIZE}"
+    PHP_POST_MAX_SIZE="${PHP_POST_MAX_SIZE:-$DEFAULT_PHP_POST_MAX_SIZE}"
+    PHP_MEMORY_LIMIT="${PHP_MEMORY_LIMIT:-$DEFAULT_PHP_MEMORY_LIMIT}"
+    PHP_MAX_EXECUTION_TIME="${PHP_MAX_EXECUTION_TIME:-$DEFAULT_PHP_MAX_EXECUTION_TIME}"
+    PHP_MAX_INPUT_TIME="${PHP_MAX_INPUT_TIME:-$DEFAULT_PHP_MAX_INPUT_TIME}"
+
+    echo
+    print_header "PHP ЛИМИТЫ САЙТА"
+    print_info "Enter оставляет текущее значение."
+    ask_with_default "upload_max_filesize" PHP_UPLOAD_MAX_FILESIZE "$PHP_UPLOAD_MAX_FILESIZE"
+    ask_with_default "post_max_size" PHP_POST_MAX_SIZE "$PHP_POST_MAX_SIZE"
+    ask_with_default "memory_limit" PHP_MEMORY_LIMIT "$PHP_MEMORY_LIMIT"
+    ask_with_default "max_execution_time" PHP_MAX_EXECUTION_TIME "$PHP_MAX_EXECUTION_TIME"
+    ask_with_default "max_input_time" PHP_MAX_INPUT_TIME "$PHP_MAX_INPUT_TIME"
+}
+
+apply_php_limits() {
+    print_info "Применение PHP-лимитов в контейнере $CONTAINER_WP..."
+    docker exec -u 0 "$CONTAINER_WP" bash -c "cat > /usr/local/etc/php/conf.d/uploads.ini <<EOF
+upload_max_filesize = ${PHP_UPLOAD_MAX_FILESIZE}
+post_max_size = ${PHP_POST_MAX_SIZE}
+memory_limit = ${PHP_MEMORY_LIMIT}
+max_execution_time = ${PHP_MAX_EXECUTION_TIME}
+max_input_time = ${PHP_MAX_INPUT_TIME}
+EOF"
+    docker restart "$CONTAINER_WP" > /dev/null
+    print_success "PHP-лимиты обновлены."
+}
+
+write_env_file() {
+    cat << EOF_ENV > "$PRODUCT_DIR/.env"
+WP_DOMAIN=$WP_DOMAIN
+SSL_EMAIL=$SSL_EMAIL
+DB_PASSWORD=$DB_PASSWORD
+SITE_SLUG=$SITE_SLUG
+CONTAINER_WP=$CONTAINER_WP
+CONTAINER_DB=$CONTAINER_DB
+PHP_UPLOAD_MAX_FILESIZE=$PHP_UPLOAD_MAX_FILESIZE
+PHP_POST_MAX_SIZE=$PHP_POST_MAX_SIZE
+PHP_MEMORY_LIMIT=$PHP_MEMORY_LIMIT
+PHP_MAX_EXECUTION_TIME=$PHP_MAX_EXECUTION_TIME
+PHP_MAX_INPUT_TIME=$PHP_MAX_INPUT_TIME
+EOF_ENV
 }
 
 clean_url() { echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||'; }
@@ -210,10 +268,14 @@ if [ "$MODE" == "INSTALL" ]; then
     DB_PASSWORD=$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9')
 fi
 
+configure_php_limits
+write_env_file
+
 # ──────────────────────────────────────────────────────────
 # FINISH — завершение прерванной установки (пропускаем все шаги деплоя)
 if [ "$MODE" == "FINISH" ]; then
     print_header "ЗАВЕРШЕНИЕ НАСТРОЙКИ WORDPRESS: $WP_DOMAIN"
+    apply_php_limits
 
     ensure_wp_cli() {
         docker exec -u 0 "$CONTAINER_WP" bash -c '
@@ -337,17 +399,9 @@ for file in "${FILES[@]}"; do
 done
 
 # ──────────────────────────────────────────────────────────
-# Генерация .env и docker-compose
+# Генерация docker-compose
 if [ "$MODE" == "INSTALL" ]; then
     print_header "ГЕНЕРАЦИЯ КОНФИГУРАЦИИ..."
-    cat << EOF_ENV > .env
-WP_DOMAIN=$WP_DOMAIN
-SSL_EMAIL=$SSL_EMAIL
-DB_PASSWORD=$DB_PASSWORD
-SITE_SLUG=$SITE_SLUG
-CONTAINER_WP=$CONTAINER_WP
-CONTAINER_DB=$CONTAINER_DB
-EOF_ENV
 fi
 
 escape_sed() { printf '%s' "$1" | sed -e 's/[|&]/\\&/g'; }
@@ -393,6 +447,7 @@ print_info "Обновление образов..."
 docker compose pull > /dev/null 2>&1 || true
 print_success "Запуск контейнеров..."
 docker compose up -d
+apply_php_limits
 
 # ──────────────────────────────────────────────────────────
 # WP-CLI helper
