@@ -106,7 +106,15 @@ PHP_MAX_INPUT_TIME=$PHP_MAX_INPUT_TIME
 EOF_ENV
 }
 
-clean_url() { echo "$1" | sed -e 's|^[^/]*//||' -e 's|/.*$||'; }
+clean_url() {
+    printf '%s' "$1" \
+        | tr -d '\r' \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+        -e 's|^[^/]*//||' -e 's|/.*$||' \
+        | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+        | sed -e 's/[^a-z0-9.-]//g' -e 's/\.\.+/./g' \
+        -e 's/^-*//' -e 's/-*$//' -e 's/^\.//' -e 's/\.$//'
+}
 make_slug() {
     # LC_ALL=C обязателен чтобы tr не ломал многобайтовые UTF-8 символы
     local input="$1"
