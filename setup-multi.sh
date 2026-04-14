@@ -138,11 +138,19 @@ if [ "$ACTION" == "UPDATE" ] || [ "$ACTION" == "REINSTALL" ] || [ "$ACTION" == "
     source "$PRODUCT_DIR/.env"
     # WP_DOMAIN, SSL_EMAIL, DB_PASSWORD, CONTAINER_WP, CONTAINER_DB загружены из .env
 
+    # ── Подтверждение выбранного сайта ─────────────────────
+    echo
+    print_warning "Выбран сайт: ${WP_DOMAIN}"
+    ask_user "Всё верно? Продолжить? (y/n): " confirm_site
+    if [[ ! $confirm_site =~ ^[Yy]$ ]]; then
+        print_info "Отмена."; exit 0
+    fi
+
     if [ "$ACTION" == "REINSTALL" ]; then
         print_error "ВНИМАНИЕ: Все данные сайта $WP_DOMAIN будут УДАЛЕНЫ!"
-        ask_user "Вы уверены? Введите домен для подтверждения ($WP_DOMAIN): " confirm_domain
-        if [ "$confirm_domain" != "$WP_DOMAIN" ]; then
-            print_info "Домен не совпал. Отмена."; exit 1
+        ask_user "Вы уверены? (y/n): " confirm_reinstall
+        if [[ ! $confirm_reinstall =~ ^[Yy]$ ]]; then
+            print_info "Отмена."; exit 0
         fi
         MODE="INSTALL"
     elif [ "$ACTION" == "FINISH" ]; then
@@ -533,19 +541,7 @@ fi
 if [ -n "$TRAEFIK_ID" ]; then
     docker network connect comandos-network "$TRAEFIK_ID" 2>/dev/null || true
 
-    TRAEFIK_RESOLVER=$(docker inspect "$TRAEFIK_ID" --format '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' \
-        | tr -d '[],' | tr ' ' '\n' | grep -oE -- 'certificatesresolvers\.[^=. "]+' | head -n1 | sed 's/certificatesresolvers\.//')
-    # Пробуем найти certResolver из существующих yml-файлов в dynamic dir (самый надёжный способ)
-    if [ -z "$TRAEFIK_RESOLVER" ] && [ -n "$DYNAMIC_DIR" ] && [ -d "$DYNAMIC_DIR" ]; then
-        TRAEFIK_RESOLVER=$(grep -rh 'certResolver:' "$DYNAMIC_DIR" 2>/dev/null | head -n1 | awk '{print $2}' | tr -d '"\r')
-    fi
-    if [ -z "$TRAEFIK_RESOLVER" ]; then
-        for known in "mytlschallenge" "myresolver" "letsencrypt" "comandos-resolver"; do
-            docker logs --tail 100 "$TRAEFIK_ID" 2>&1 | grep -q "$known" && { TRAEFIK_RESOLVER="$known"; break; }
-        done
-    fi
-    TRAEFIK_RESOLVER="${TRAEFIK_RESOLVER:-$DEFAULT_CERT_RESOLVER}"
-
+    # Сначала определяем DYNAMIC_DIR (нужен для поиска certResolver)
     if [ ! -z "$install_traefik_choice" ] && [[ $install_traefik_choice =~ ^[Yy]$ ]]; then
         DYNAMIC_DIR="$BASE_DIR/traefik/dynamic"
     else
@@ -554,6 +550,19 @@ if [ -n "$TRAEFIK_ID" ]; then
     fi
     DYNAMIC_DIR="${DYNAMIC_DIR:-/root/traefik-dynamic}"
     mkdir -p "$DYNAMIC_DIR"
+
+    # Определяем certResolver: из конфига контейнера → из yml-файлов dynamic → из логов → дефолт
+    TRAEFIK_RESOLVER=$(docker inspect "$TRAEFIK_ID" --format '{{json .Config.Cmd}} {{json .Config.Entrypoint}}' \
+        | tr -d '[],' | tr ' ' '\n' | grep -oE -- 'certificatesresolvers\.[^=. "]+' | head -n1 | sed 's/certificatesresolvers\.//')
+    if [ -z "$TRAEFIK_RESOLVER" ] && [ -d "$DYNAMIC_DIR" ]; then
+        TRAEFIK_RESOLVER=$(grep -rh 'certResolver:' "$DYNAMIC_DIR" 2>/dev/null | head -n1 | awk '{print $2}' | tr -d '"\r')
+    fi
+    if [ -z "$TRAEFIK_RESOLVER" ]; then
+        for known in "mytlschallenge" "myresolver" "letsencrypt" "comandos-resolver"; do
+            docker logs --tail 100 "$TRAEFIK_ID" 2>&1 | grep -q "$known" && { TRAEFIK_RESOLVER="$known"; break; }
+        done
+    fi
+    TRAEFIK_RESOLVER="${TRAEFIK_RESOLVER:-$DEFAULT_CERT_RESOLVER}"
 
     # Отдельный файл маршрута для каждого сайта
     cat << EOF_YAML > "$DYNAMIC_DIR/comandos-${SITE_SLUG}.yml"
