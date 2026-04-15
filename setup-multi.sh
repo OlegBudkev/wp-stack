@@ -46,11 +46,14 @@ print_info()    { echo -e "${BLUE}ℹ $1${NC}"; }
 
 ask_user() {
     local prompt=$1 var_name=$2 extra_opt=$3
+    local input
     if [ -c /dev/tty ]; then
-        read $extra_opt -p "$prompt" "$var_name" < /dev/tty
+        IFS= read -r $extra_opt -p "$prompt" input < /dev/tty
     else
-        read $extra_opt -p "$prompt" "$var_name"
+        IFS= read -r $extra_opt -p "$prompt" input
     fi
+    input=${input%$'\r'}
+    printf -v "$var_name" '%s' "$input"
 }
 
 ask_with_default() {
