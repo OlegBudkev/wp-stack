@@ -56,6 +56,18 @@ ask_user() {
     printf -v "$var_name" '%s' "$input"
 }
 
+normalize_answer() {
+    local value="$1"
+    value=${value//$'\r'/}
+    value=${value//$'\n'/}
+    value=$(printf '%s' "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    printf '%s' "${value,,}"
+}
+
+is_yes() {
+    [ "$(normalize_answer "$1")" = "y" ]
+}
+
 ask_with_default() {
     local prompt="$1" var_name="$2" default_value="$3"
     local answer
@@ -211,14 +223,14 @@ if [ "$ACTION" == "UPDATE" ] || [ "$ACTION" == "REINSTALL" ] || [ "$ACTION" == "
     echo
     print_warning "Выбран сайт: ${WP_DOMAIN}"
     ask_user "Всё верно? Продолжить? (y/n): " confirm_site
-    if [[ ! $confirm_site =~ ^[Yy]$ ]]; then
+    if ! is_yes "$confirm_site"; then
         print_info "Отмена."; exit 0
     fi
 
     if [ "$ACTION" == "REINSTALL" ]; then
         print_error "ВНИМАНИЕ: Все данные сайта $WP_DOMAIN будут УДАЛЕНЫ!"
         ask_user "Вы уверены? (y/n): " confirm_reinstall
-        if [[ ! $confirm_reinstall =~ ^[Yy]$ ]]; then
+        if ! is_yes "$confirm_reinstall"; then
             print_info "Отмена."; exit 0
         fi
         MODE="INSTALL"
@@ -554,7 +566,7 @@ if [ -z "$TRAEFIK_ID" ]; then
     print_warning "Traefik не найден."
     if [ "$MODE" == "INSTALL" ]; then
         ask_user "Установить Traefik? (y/n): " install_traefik_choice
-        if [[ $install_traefik_choice =~ ^[Yy]$ ]]; then
+        if is_yes "$install_traefik_choice"; then
             SSL_EMAIL_TRAEFIK="${SSL_EMAIL:-admin@example.com}"
             mkdir -p "$BASE_DIR/traefik/dynamic"
             touch "$BASE_DIR/traefik/acme.json"
@@ -608,7 +620,7 @@ if [ -n "$TRAEFIK_ID" ]; then
     docker network connect comandos-network "$TRAEFIK_ID" 2>/dev/null || true
 
     # Сначала определяем DYNAMIC_DIR (нужен для поиска certResolver)
-    if [ ! -z "$install_traefik_choice" ] && [[ $install_traefik_choice =~ ^[Yy]$ ]]; then
+    if [ -n "$install_traefik_choice" ] && is_yes "$install_traefik_choice"; then
         DYNAMIC_DIR="$BASE_DIR/traefik/dynamic"
     else
         DYNAMIC_DIR=$(docker inspect "$TRAEFIK_ID" --format '{{range .Mounts}}{{printf "%s|%s\n" .Destination .Source}}{{end}}' \
